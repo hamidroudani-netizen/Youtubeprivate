@@ -58,6 +58,8 @@ fun VideoCard(
     video: Video,
     onClick: () -> Unit,
     onFavoriteToggle: (() -> Unit)? = null,
+    watchHistory: com.example.data.local.WatchHistoryEntity? = null,
+    onRemoveFromResume: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val strings = LocalAppStrings.current
@@ -69,6 +71,8 @@ fun VideoCard(
         animationSpec = spring(),
         label = "card_scale"
     )
+
+    val progressPct = watchHistory?.progressPercentage ?: 0
 
     Card(
         modifier = modifier
@@ -117,7 +121,7 @@ fun VideoCard(
                             Brush.verticalGradient(
                                 colors = listOf(
                                     Color.Transparent,
-                                    Color.Black.copy(alpha = 0.4f)
+                                    Color.Black.copy(alpha = 0.5f)
                                 ),
                                 startY = 100f
                             )
@@ -173,21 +177,80 @@ fun VideoCard(
                     }
                 }
 
-                // Favorite button top-right (if enabled)
-                if (onFavoriteToggle != null) {
-                    IconButton(
-                        onClick = onFavoriteToggle,
+                // Favorite or Remove button top-right
+                Row(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (onRemoveFromResume != null) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color.Red.copy(alpha = 0.85f),
+                            contentColor = Color.White,
+                            modifier = Modifier
+                                .clickable { onRemoveFromResume() }
+                                .size(36.dp)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = "✕",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    } else if (onFavoriteToggle != null) {
+                        IconButton(
+                            onClick = onFavoriteToggle,
+                            modifier = Modifier
+                                .background(Color.Black.copy(alpha = 0.3f), CircleShape)
+                                .size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (video.favorite) Icons.Default.Star else Icons.Outlined.StarBorder,
+                                contentDescription = strings.tabFavorites,
+                                tint = if (video.favorite) Color(0xFFFFD54F) else Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Progress Percentage badge bottom-right
+                if (progressPct > 0) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                         modifier = Modifier
-                            .padding(6.dp)
-                            .align(Alignment.TopEnd)
-                            .background(Color.Black.copy(alpha = 0.3f), CircleShape)
-                            .size(36.dp)
+                            .padding(bottom = 12.dp, end = 10.dp)
+                            .align(Alignment.BottomEnd)
                     ) {
-                        Icon(
-                            imageVector = if (video.favorite) Icons.Default.Star else Icons.Outlined.StarBorder,
-                            contentDescription = strings.tabFavorites,
-                            tint = if (video.favorite) Color(0xFFFFD54F) else Color.White,
-                            modifier = Modifier.size(22.dp)
+                        Text(
+                            text = "$progressPct %",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp
+                            ),
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
+
+                    // Bottom progress bar overlay
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .align(Alignment.BottomCenter)
+                            .background(Color.White.copy(alpha = 0.3f))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize(fraction = (progressPct / 100f).coerceIn(0f, 1f))
+                                .background(MaterialTheme.colorScheme.primary)
                         )
                     }
                 }

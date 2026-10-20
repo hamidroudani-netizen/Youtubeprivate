@@ -7,9 +7,12 @@ import com.example.data.local.VideoEntity
 import com.example.data.remote.CloudSyncState
 import com.example.data.remote.FirestoreSyncManager
 import com.example.domain.model.Video
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import java.util.regex.Pattern
 
 class VideoRepository(
@@ -17,8 +20,35 @@ class VideoRepository(
     private val videoDao: VideoDao,
     private val profileDao: com.example.data.local.ProfileDao,
     private val parentPreferences: ParentPreferences,
-    val syncManager: FirestoreSyncManager = FirestoreSyncManager(context, videoDao, profileDao)
+    private val watchHistoryDao: com.example.data.local.WatchHistoryDao = com.example.data.local.AppDatabase.getDatabase(context).watchHistoryDao(),
+    val syncManager: FirestoreSyncManager = FirestoreSyncManager(
+        context = context,
+        videoDao = videoDao,
+        profileDao = profileDao,
+        syncQueueDao = com.example.data.local.AppDatabase.getDatabase(context).syncQueueDao(),
+        watchHistoryDao = watchHistoryDao
+    )
 ) {
+
+    init {
+        com.example.data.remote.CloudSyncWorker.schedulePeriodicSync(context)
+        CoroutineScope(Dispatchers.IO).launch {
+            cleanFakeVideosAndEnsureReal()
+        }
+    }
+
+    private suspend fun cleanFakeVideosAndEnsureReal() {
+        try {
+            com.example.data.local.InitialDataSeed.FAKE_YOUTUBE_IDS.forEach { fakeId ->
+                videoDao.deleteByYoutubeId(fakeId)
+                syncManager.recordDeletedVideo(fakeId)
+            }
+            if (videoDao.getVideoByYoutubeId("9iW5fBH6PRQ") == null) {
+                videoDao.insertVideos(com.example.data.local.InitialDataSeed.getInitialVideos())
+                syncManager.pushAllVideosToCloud(getFamilyCode())
+            }
+        } catch (_: Exception) {}
+    }
 
     val allProfiles: Flow<List<com.example.domain.model.ChildProfile>> = profileDao.getAllProfiles().map { list ->
         list.map { it.toDomain() }
@@ -36,6 +66,7 @@ class VideoRepository(
     }
 
     suspend fun deleteProfile(profile: com.example.domain.model.ChildProfile) {
+        syncManager.recordDeletedProfile(profile.id)
         profileDao.deleteProfile(com.example.data.local.ProfileEntity.fromDomain(profile))
         syncManager.pushAllVideosToCloud(getFamilyCode())
     }
@@ -107,11 +138,16 @@ class VideoRepository(
     }
 
     suspend fun deleteVideo(video: Video) {
+        syncManager.recordDeletedVideo(video.youtubeId)
         videoDao.deleteVideo(VideoEntity.fromDomain(video))
         syncManager.pushAllVideosToCloud(getFamilyCode())
     }
 
     suspend fun deleteById(id: Long) {
+        // Find video entity to get youtubeId for deletion record
+        videoDao.getAllVideosList().find { it.id == id }?.let { entity ->
+            syncManager.recordDeletedVideo(entity.youtubeId)
+        }
         videoDao.deleteVideoById(id)
         syncManager.pushAllVideosToCloud(getFamilyCode())
     }
@@ -123,6 +159,49 @@ class VideoRepository(
 
     suspend fun updateLastPlayed(id: Long) {
         videoDao.updateLastPlayed(id, System.currentTimeMillis())
+    }
+
+    fun getWatchHistoryForProfile(profileId: String): Flow<List<com.example.data.local.WatchHistoryEntity>> {
+        return watchHistoryDao.getWatchHistoryForProfile(profileId)
+    }
+
+    fun getUnfinishedHistoryForProfile(profileId: String): Flow<List<com.example.data.local.WatchHistoryEntity>> {
+        return watchHistoryDao.getUnfinishedHistoryForProfile(profileId)
+    }
+
+    fun getWatchProgress(profileId: String, youtubeId: String): Flow<com.example.data.local.WatchHistoryEntity?> {
+        return watchHistoryDao.getWatchProgress(profileId, youtubeId)
+    }
+
+    suspend fun updateWatchProgress(
+        profileId: String,
+        youtubeId: String,
+        positionSeconds: Long,
+        durationSeconds: Long
+    ) {
+        if (profileId.isBlank() || youtubeId.isBlank()) return
+        val existing = watchHistoryDao.getWatchProgressDirect(profileId, youtubeId)
+        val pct = if (durationSeconds > 0) ((positionSeconds * 100) / durationSeconds).toInt().coerceIn(0, 100) else 0
+        val isFinished = pct >= 95 || (durationSeconds > 0 && (durationSeconds - positionSeconds) <= 10)
+        
+        val newEntity = com.example.data.local.WatchHistoryEntity(
+            profileId = profileId,
+            youtubeId = youtubeId,
+            positionSeconds = positionSeconds,
+            durationSeconds = durationSeconds,
+            progressPercentage = pct,
+            lastWatchedAt = System.currentTimeMillis(),
+            createdAt = existing?.createdAt ?: System.currentTimeMillis(),
+            isFinished = isFinished
+        )
+        watchHistoryDao.upsertWatchHistory(newEntity)
+        syncManager.pushAllVideosToCloud(getFamilyCode())
+    }
+
+    suspend fun removeFromResume(profileId: String, youtubeId: String) {
+        if (profileId.isBlank() || youtubeId.isBlank()) return
+        watchHistoryDao.deleteWatchHistory(profileId, youtubeId)
+        syncManager.pushAllVideosToCloud(getFamilyCode())
     }
 
     suspend fun updateVideoOrders(videos: List<Video>) {

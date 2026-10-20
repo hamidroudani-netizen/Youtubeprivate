@@ -152,7 +152,10 @@ private fun YouTubePriveAppContent(
             VideoPlayerScreen(
                 youtubeId = youtubeId,
                 videoTitle = title,
-                onBackClick = { navController.popBackStack() }
+                onBackClick = { navController.popBackStack() },
+                onProgressUpdate = { pos, dur ->
+                    videoViewModel.saveProgress(youtubeId, pos, dur)
+                }
             )
         }
 

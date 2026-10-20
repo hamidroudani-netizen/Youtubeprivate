@@ -46,6 +46,9 @@ interface VideoDao {
     @Query("DELETE FROM videos WHERE youtubeId NOT IN (:youtubeIds)")
     suspend fun deleteVideosNotIn(youtubeIds: List<String>)
 
+    @Query("DELETE FROM videos WHERE youtubeId = :youtubeId")
+    suspend fun deleteByYoutubeId(youtubeId: String)
+
     @Query("DELETE FROM videos")
     suspend fun deleteAllVideos()
 

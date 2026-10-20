@@ -18,12 +18,27 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+import kotlinx.coroutines.flow.map
+
+enum class VideoStateFilter {
+    ALL, UNWATCHED
+}
+
+enum class VideoSortOption {
+    RECENT, OLD, ALPHABETICAL
+}
+
 class VideoViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: VideoRepository
     private val parentPreferences: ParentPreferences = ParentPreferences(application)
 
     val selectedCategory = MutableStateFlow("Tous")
+    val selectedCategories = MutableStateFlow<Set<String>>(setOf("Tous"))
+    val selectedStateFilter = MutableStateFlow(VideoStateFilter.ALL)
+    val selectedSortOption = MutableStateFlow(VideoSortOption.RECENT)
+    val isResumeMode = MutableStateFlow(false)
+
     val selectedProfileId = MutableStateFlow(parentPreferences.getActiveProfileId())
     private val _searchQuery = MutableStateFlow("")
     val searchQuery = _searchQuery.asStateFlow()
@@ -33,7 +48,21 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
 
     val cloudSyncState: StateFlow<CloudSyncState>
 
-    val categories = listOf("Tous", "⭐ Favoris", "Dessins animés", "Comptines", "Éducatif", "Chansons")
+    val availableCategories = listOf(
+        "Tous",
+        "⭐ Favoris",
+        "Documentaire",
+        "Dessin animé",
+        "Éducation",
+        "Religion",
+        "Jeux vidéo",
+        "Tutoriels",
+        "Divers",
+        "Comptines",
+        "Chansons"
+    )
+
+    val categories = availableCategories
 
     val profiles: StateFlow<List<com.example.domain.model.ChildProfile>>
 
@@ -51,41 +80,154 @@ class VideoViewModel(application: Application) : AndroidViewModel(application) {
             started = SharingStarted.WhileSubscribed(5000),
             initialValue = emptyList()
         )
-        // Start listening to real-time Cloud Firestore updates for the current Family Code
         repository.startCloudSync()
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
+    val watchHistoryMap: StateFlow<Map<String, com.example.data.local.WatchHistoryEntity>> = selectedProfileId.flatMapLatest { profileId ->
+        repository.getWatchHistoryForProfile(profileId.toString())
+    }.map { list ->
+        list.associateBy { it.youtubeId }
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5000),
+        initialValue = emptyMap()
+    )
+
+    @OptIn(ExperimentalCoroutinesApi::class)
     val videos: StateFlow<List<Video>> = combine(
-        selectedCategory,
+        repository.allVideos,
+        selectedCategories,
         selectedProfileId,
-        _searchQuery
-    ) { category, profileId, query ->
-        Triple(category, profileId, query)
-    }.flatMapLatest { (category, profileId, query) ->
-        val flow = when (category) {
-            "Tous" -> repository.allVideos
-            "⭐ Favoris" -> repository.favoriteVideos
-            else -> repository.getVideosByCategory(category)
-        }
-        flow
-    }.combine(selectedProfileId) { videoList, profileId ->
-        if (profileId == 0L) {
-            videoList
+        _searchQuery,
+        selectedStateFilter,
+        selectedSortOption,
+        isResumeMode,
+        watchHistoryMap
+    ) { args ->
+        val allVids = args[0] as List<Video>
+        val cats = args[1] as Set<String>
+        val profileId = args[2] as Long
+        val query = args[3] as String
+        val stateFilter = args[4] as VideoStateFilter
+        val sortOption = args[5] as VideoSortOption
+        val resumeOnly = args[6] as Boolean
+        val historyMap = args[7] as Map<String, com.example.data.local.WatchHistoryEntity>
+
+        // 1. Profile filter
+        var filtered = if (profileId == 0L) {
+            allVids
         } else {
-            videoList.filter { it.targetProfileId == 0L || it.targetProfileId == profileId }
+            allVids.filter { it.targetProfileId == 0L || it.targetProfileId == profileId }
         }
-    }.combine(_searchQuery) { videoList, query ->
-        if (query.isBlank()) {
-            videoList
+
+        // 2. Search query filter
+        if (query.isNotBlank()) {
+            filtered = filtered.filter {
+                it.title.contains(query, ignoreCase = true) || it.description.contains(query, ignoreCase = true)
+            }
+        }
+
+        if (resumeOnly) {
+            // Resume Mode: Videos started but not finished for current child profile
+            filtered = filtered.filter { v ->
+                val h = historyMap[v.youtubeId]
+                h != null && !h.isFinished && h.positionSeconds > 0
+            }
         } else {
-            videoList.filter { it.title.contains(query, ignoreCase = true) || it.description.contains(query, ignoreCase = true) }
+            // Standard Filter Mode
+            // Category filter
+            if (!cats.contains("Tous") && cats.isNotEmpty()) {
+                val hasFav = cats.contains("⭐ Favoris")
+                val otherCats = cats.filterNot { it == "⭐ Favoris" || it == "Tous" }
+
+                filtered = filtered.filter { v ->
+                    val matchFav = hasFav && v.favorite
+                    val matchCat = otherCats.isNotEmpty() && (
+                        v.category in otherCats ||
+                        (v.category == "Dessins animés" && "Dessin animé" in otherCats) ||
+                        (v.category == "Dessin animé" && "Dessins animés" in otherCats) ||
+                        (v.category == "Éducatif" && "Éducation" in otherCats) ||
+                        (v.category == "Éducation" && "Éducatif" in otherCats)
+                    )
+                    matchFav || matchCat
+                }
+            }
+
+            // State filter (All vs Unwatched)
+            if (stateFilter == VideoStateFilter.UNWATCHED) {
+                filtered = filtered.filter { v ->
+                    val h = historyMap[v.youtubeId]
+                    h == null || h.positionSeconds == 0L
+                }
+            }
+        }
+
+        // Sorting
+        when (sortOption) {
+            VideoSortOption.RECENT -> filtered.sortedByDescending { it.createdAt }
+            VideoSortOption.OLD -> filtered.sortedBy { it.createdAt }
+            VideoSortOption.ALPHABETICAL -> filtered.sortedBy { it.title.lowercase() }
         }
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
         initialValue = emptyList()
     )
+
+    fun toggleCategory(category: String) {
+        val current = selectedCategories.value.toMutableSet()
+        if (category == "Tous") {
+            selectedCategories.value = setOf("Tous")
+        } else {
+            current.remove("Tous")
+            if (current.contains(category)) {
+                current.remove(category)
+                if (current.isEmpty()) {
+                    current.add("Tous")
+                }
+            } else {
+                current.add(category)
+            }
+            selectedCategories.value = current
+        }
+    }
+
+    fun setStateFilter(filter: VideoStateFilter) {
+        selectedStateFilter.value = filter
+    }
+
+    fun setSortOption(sort: VideoSortOption) {
+        selectedSortOption.value = sort
+    }
+
+    fun resetFilters() {
+        selectedCategories.value = setOf("Tous")
+        selectedStateFilter.value = VideoStateFilter.ALL
+        selectedSortOption.value = VideoSortOption.RECENT
+    }
+
+    fun toggleResumeMode() {
+        isResumeMode.value = !isResumeMode.value
+    }
+
+    fun setResumeMode(active: Boolean) {
+        isResumeMode.value = active
+    }
+
+    fun saveProgress(youtubeId: String, positionSeconds: Long, durationSeconds: Long) {
+        val profileId = selectedProfileId.value
+        viewModelScope.launch {
+            repository.updateWatchProgress(profileId.toString(), youtubeId, positionSeconds, durationSeconds)
+        }
+    }
+
+    fun removeFromResume(youtubeId: String) {
+        val profileId = selectedProfileId.value
+        viewModelScope.launch {
+            repository.removeFromResume(profileId.toString(), youtubeId)
+        }
+    }
 
     fun selectProfile(profileId: Long) {
         selectedProfileId.value = profileId

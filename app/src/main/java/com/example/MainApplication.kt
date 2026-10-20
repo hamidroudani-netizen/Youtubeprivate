@@ -19,7 +19,7 @@ class MainApplication : Application() {
                 Log.d("MainApplication", "FirebaseApp initialized with default fallback options.")
             }
         } catch (e: Throwable) {
-            Log.e("MainApplication", "Could not initialize FirebaseApp: ${e.message}")
+            Log.w("MainApplication", "Notice initializing FirebaseApp: ${e.message}")
         }
     }
 }
